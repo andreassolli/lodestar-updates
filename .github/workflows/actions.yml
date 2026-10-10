@@ -1,0 +1,67 @@
+# Daily update of the AQW wiki item catalog (items.json in the repository root),
+# used by the AQW Lodestar extension.
+name: Update item catalog
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # daily at 03:17 UTC (05:17 Oslo summer time)
+  workflow_dispatch: {} # "Run workflow" button in the Actions tab
+
+permissions:
+  contents: write # commit items.json to main
+
+concurrency:
+  group: update-item-catalog
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Update catalog
+        id: update
+        # A failed run still saves its progress, so commit it either way.
+        continue-on-error: true
+        run: python scraper/update_catalog.py --catalog items.json --time-limit-minutes 330
+
+      - name: Commit to main
+        if: hashFiles('items.json') != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add items.json
+          if git diff --cached --quiet; then
+            echo "Catalog unchanged"
+            exit 0
+          fi
+          git commit -m "Update item catalog $(date -u +%Y-%m-%d)"
+
+          # The run can take a while; if main moved meanwhile, rebase onto it.
+          for attempt in 1 2 3; do
+            git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            echo "Push failed (attempt $attempt); retrying"
+            sleep 10
+          done
+          exit 1
+
+      - name: Fail if the update failed
+        if: steps.update.outcome == 'failure'
+        run: |
+          echo "The update hit an error; its progress was saved and the next run continues."
+          exit 1
